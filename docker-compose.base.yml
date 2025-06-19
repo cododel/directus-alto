@@ -1,0 +1,35 @@
+services:
+  directus:
+    build:
+      context: .
+      dockerfile: directus/Dockerfile
+    command: sh -c "node index.js >> /directus/logs/api.log 2>&1"
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./directus/migrations:/directus/migrations
+      - ./directus/data/uploads:/directus/uploads
+      - ./directus/data/logs:/directus/logs
+      # Mount your extensions here as separate volumes to prevent overwriting the base extensions in the base image
+      # - ./directus/extensions/your-extension:/directus/extensions/your-extension
+    ports:
+      - "127.0.0.1:8055:8055"
+    depends_on:
+      - database
+      # - cache
+
+  database:
+    image: postgis/postgis:13-3.3-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./directus/data/database:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432" # SSH tunnel port forwarding for remote database access
+
+  # cache:
+  #   image: redis:6.2.10-alpine
+  #   restart: unless-stopped

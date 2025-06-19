@@ -1,0 +1,432 @@
+#!/bin/bash
+# Directus Alto - Management script for Directus development environment
+set -e
+# set -u
+set -o pipefail
+
+# Determine the script's directory
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+# === Configuration ===
+DEFAULT_CONFIG_FILE=".env"
+DEFAULT_BASE_DIR="$SCRIPT_DIR/directus/data/.alto"
+
+# === Logging Functions ===
+log() {
+    local level=$1
+    shift
+    printf "[%s] %s\\n" "$level" "$*" >&2
+}
+
+info() {
+    log "INFO" "$*"
+}
+
+error() {
+    log "ERROR" "❌ $*"
+    exit 1
+}
+
+warn() {
+    log "WARNING" "⚠️  $*"
+}
+
+success() {
+    log "SUCCESS" "✅ $*"
+}
+
+# === Utility Functions ===
+check_dependencies() {
+    if ! command -v docker &>/dev/null; then
+        error "Docker is not installed. Please install Docker (https://docs.docker.com/get-docker/)"
+    fi
+
+    if command -v docker-compose &>/dev/null; then
+        DOCKER_COMPOSE_CMD=("docker-compose")
+    elif command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD=("docker" "compose")
+    else
+        error "Docker Compose is not installed. Please install Docker Compose (https://docs.docker.com/compose/install/)"
+    fi
+
+    if ! command -v bun &>/dev/null; then
+        error "Bun is not installed. Please install Bun (https://bun.sh/docs/installation)"
+    fi
+}
+
+# Cross-platform function to find the latest file by modification time
+find_latest_file() {
+    local directory="$1"
+    local pattern="$2"
+    
+    if [[ ! -d "$directory" ]]; then
+        return 1
+    fi
+    
+    # Use ls with -t (sort by modification time) and find the first match
+    # This works on both BSD (macOS) and GNU (Linux) systems
+    local latest_file
+    latest_file=$(find "$directory" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -n 1)
+    
+    if [[ -n "$latest_file" && -f "$latest_file" ]]; then
+        echo "$latest_file"
+        return 0
+    fi
+    
+    return 1
+}
+
+ensure_directories() {
+    local base_dir="$1"
+    local dirs=(
+        "$SCRIPT_DIR/directus/directus-config"
+        "$SCRIPT_DIR/directus/extensions"
+        "$SCRIPT_DIR/directus/migrations"
+        "$SCRIPT_DIR/directus/seed"
+        "$SCRIPT_DIR/directus/data/uploads"
+        "$base_dir/backups"
+    )
+
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir"
+        fi
+    done
+}
+
+load_configuration() {
+    local config_file="$1"
+    if [[ ! -f "$config_file" ]]; then
+        warn "Configuration file '$config_file' not found. Using default environment variables or values."
+    else
+        set -a
+        source "$config_file"
+        set +a
+    fi
+
+    : "${PUBLIC_URL:=http://localhost}"
+    : "${ADMIN_TOKEN:=default_token}"
+    : "${ADMIN_EMAIL:=admin@example.com}"
+    : "${ADMIN_PASSWORD:=password}"
+    : "${DB_USER:=default_user}"
+    : "${DB_DATABASE:=default_db}"
+    : "${ALTO_BASE_DIR:=$DEFAULT_BASE_DIR}"
+
+    BASE_DIR="$ALTO_BASE_DIR"
+}
+
+show_help() {
+    printf "Usage: %s <command> [options] [command_args...]\n\n" "$(basename "$0")"
+    printf "Alto CLI - A versatile utility for managing Directus projects, databases, and containers.\n\n"
+    printf "Commands:\n"
+    printf "  db-flush                 Drop and recreate the public database schema\n"
+    printf "  db-dump [name]           Create a database backup with optional name (default: 'backup')\n"
+    printf "                           Creates: {timestamp}_{name}.sql in ./directus/data/.alto/backups/\n"
+    printf "                           Example: %s db-dump my_backup -> 20240115_143000_my_backup.sql\n" "$(basename "$0")"
+    printf "  db-restore [name|path]   Restore database from backup\n"
+    printf "                           Without args: restores latest backup by modification time\n"
+    printf "                           With name: finds backup containing that name\n"
+    printf "                           With path: restores specific backup file\n"
+    printf "                           Example: %s db-restore my_backup\n" "$(basename "$0")"
+    printf "\n"
+    printf "  psql [psql_args...]      Access the PostgreSQL database via psql\n"
+    printf "                           Example: %s psql -c '\\l'\n" "$(basename "$0")"
+    printf "  redis [redis_args...]    Access Redis CLI in the cache container\n"
+    printf "                           Example: %s redis PING\n" "$(basename "$0")"
+    printf "\n"
+    printf "  d [directus_args...]     Alias for 'directus' command\n"
+    printf "  directus [directus_args...] Execute Directus CLI commands within the container\n"
+    printf "                           Example: %s directus users create ...\n" "$(basename "$0")"
+    printf "\n"
+    printf "  ds [sync_args...]        Alias for 'directus-sync' command\n"
+    printf "  directus-sync [sync_args...] Synchronize data and schema with Directus\n"
+    printf "                           (See: https://github.com/tractr/directus-sync)\n"
+    printf "                           Example: %s directus-sync pull all\n" "$(basename "$0")"
+    printf "  init-directus-sync       Initialize the directus-sync.config.js file\n"
+    printf "\n"
+    printf "Options:\n"
+    printf "  --help                   Display this help message\n"
+    printf "  --config <file>          Specify an alternative configuration file (default: %s)\n" "$DEFAULT_CONFIG_FILE"
+    printf "\n"
+    printf "Default Behavior:\n"
+    printf "  If no specific command is provided, arguments are passed directly to '%s'.\n" "$DOCKER_COMPOSE_CMD"
+    printf "  This allows seamless interaction with your development environment.\n\n"
+    printf "  Examples:\n"
+    printf "    %s up -d     # Equivalent to '%s up -d'\n" "$(basename "$0")" "$DOCKER_COMPOSE_CMD"
+    printf "    %s down      # Equivalent to '%s down'\n" "$(basename "$0")" "$DOCKER_COMPOSE_CMD"
+    printf "    %s ps        # Equivalent to '%s ps'\n" "$(basename "$0")" "$DOCKER_COMPOSE_CMD"
+}
+
+# === Core Command Functions ===
+run_redis() {
+    "${DOCKER_COMPOSE_CMD[@]}" exec cache redis-cli "$@"
+}
+
+run_directus() {
+    "${DOCKER_COMPOSE_CMD[@]}" exec directus node cli.js "$@"
+}
+
+run_d() {
+    run_directus "$@"
+}
+
+run_init-directus-sync() {
+    local sync_config_file="$SCRIPT_DIR/directus-sync.config.js"
+
+    if [[ -f "$sync_config_file" ]]; then
+        printf "⚠️  '%s' already exists. Overwrite? (y/N): " "$sync_config_file" >&2
+        read -r response
+        if ! [[ "$response" =~ ^[Yy]$ ]]; then
+            info "Aborted initialization."
+            return 0
+        fi
+    fi
+
+    printf "module.exports = {\n  extends: ['directus-sync.config.base.js'],\n  directusUrl: \"%s\",\n  // directusToken: \"%s\", // Uncomment and set if using token auth\n  directusEmail: \"%s\", // Ignored if directusToken is provided\n  directusPassword: \"%s\", // Ignored if directusToken is provided\n};\n" \
+        "$PUBLIC_URL" "$ADMIN_TOKEN" "$ADMIN_EMAIL" "$ADMIN_PASSWORD" > "$sync_config_file"
+
+    success "Configuration initialized: $sync_config_file"
+}
+
+run_directus-sync() {
+    local sync_config_file="$SCRIPT_DIR/directus-sync.config.js"
+
+    if [[ ! -f "$sync_config_file" ]]; then
+        warn "'$sync_config_file' not found. Running 'init-directus-sync' first..."
+        if ! run_init-directus-sync; then
+            error "Directus-sync initialization failed or was aborted."
+        fi
+    fi
+
+    local directus_version
+    cli_output=$("${DOCKER_COMPOSE_CMD[@]}" exec -T directus node cli.js -v)
+    directus_version=$(echo "$cli_output" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+
+    if [[ ! "$directus_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "directus_version: $cli_output"
+        error "Failed to determine Directus version."
+    fi
+
+    local major minor
+    IFS='.' read -r major minor _ <<< "$directus_version"
+
+    echo "Directus version: $directus_version"
+
+    if (( 10#${major:-0} < 11 )); then
+        echo "Using directus-sync@2"
+        bunx --bun directus-sync@2 "$@"
+    else
+        echo "Using directus-sync@3"
+        bunx --bun directus-sync@3 "$@"
+    fi
+}
+
+run_ds() {
+    run_directus-sync "$@"
+}
+
+run_psql() {
+    if [[ -z "${DB_USER:-}" ]] || [[ -z "${DB_DATABASE:-}" ]]; then
+        error "DB_USER or DB_DATABASE is not defined. Check your configuration (e.g., $CONFIG_FILE)."
+    fi
+
+    if ! "${DOCKER_COMPOSE_CMD[@]}" exec database psql -U "$DB_USER" -d "$DB_DATABASE" "$@"; then
+        error "psql command failed."
+    fi
+}
+
+run_db-flush() {
+    if [[ -z "${DB_USER:-}" ]] || [[ -z "${DB_DATABASE:-}" ]]; then
+        error "DB_USER or DB_DATABASE is not defined. Check your configuration (e.g., $CONFIG_FILE)."
+    fi
+
+    warn "Flushing database '$DB_DATABASE' (dropping and recreating the 'public' schema)..."
+    
+    local sql_command="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+    if ! "${DOCKER_COMPOSE_CMD[@]}" exec database psql -U "$DB_USER" -d "$DB_DATABASE" -c "$sql_command"; then
+        error "Failed to flush database '$DB_DATABASE'."
+    fi
+    success "Database schema reset"
+}
+
+run_db-dump() {
+    if [[ -z "${DB_USER:-}" ]] || [[ -z "${DB_DATABASE:-}" ]]; then
+        error "DB_USER or DB_DATABASE is not defined. Check your configuration (e.g., $CONFIG_FILE)."
+    fi
+
+    local dump_name="${1:-backup}"
+    local backup_dir="$BASE_DIR/backups"
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/${timestamp}_${dump_name}.sql"
+
+    mkdir -p "$backup_dir"
+
+    if ! "${DOCKER_COMPOSE_CMD[@]}" exec database pg_dump -U "$DB_USER" -d "$DB_DATABASE" > "$backup_file"; then
+        error "Failed to create database backup."
+    fi
+
+    success "Backup created: $backup_file"
+}
+
+run_db-restore() {
+    if [[ -z "${DB_USER:-}" ]] || [[ -z "${DB_DATABASE:-}" ]]; then
+        error "DB_USER or DB_DATABASE is not defined. Check your configuration (e.g., $CONFIG_FILE)."
+    fi
+
+    local backup_name_or_path="${1:-}"
+    local backup_dir="$BASE_DIR/backups"
+    local backup_file=""
+
+    mkdir -p "$backup_dir"
+
+    if [[ -z "$backup_name_or_path" ]]; then
+        backup_file=$(find_latest_file "$backup_dir" "*.sql")
+        if [[ -z "$backup_file" ]]; then
+            error "No backup files found in '$backup_dir'."
+        fi
+        info "Using latest backup: $backup_file"
+    else
+        if [[ "$backup_name_or_path" == */* ]] || [[ "$backup_name_or_path" == /* ]]; then
+            backup_file="$backup_name_or_path"
+        else
+            backup_file=$(find_latest_file "$backup_dir" "*${backup_name_or_path}*.sql")
+            if [[ -z "$backup_file" ]]; then
+                error "No backup file found matching '*${backup_name_or_path}*.sql' in '$backup_dir'."
+            fi
+        fi
+    fi
+
+    if [[ ! -f "$backup_file" ]]; then
+        error "Backup file not found: $backup_file"
+    fi
+
+    warn "Restoring database '$DB_DATABASE' from: $backup_file"
+    warn "This will first FLUSH the database (drop/recreate public schema)."
+    printf "Are you sure you want to restore, overwriting the current database? (y/N): " >&2
+    read -r confirm_restore
+    if ! [[ "$confirm_restore" =~ ^[Yy]$ ]]; then
+        info "Database restore aborted."
+        return 0
+    fi
+
+    if ! run_db-flush; then
+        error "Failed to flush database before restore. Aborting restore."
+    fi
+
+    if ! "${DOCKER_COMPOSE_CMD[@]}" exec -T database psql -U "$DB_USER" -d "$DB_DATABASE" < "$backup_file"; then
+        error "Failed to restore database from backup '$backup_file'."
+    fi
+
+    info "Restarting Directus container..."
+    if ! ("${DOCKER_COMPOSE_CMD[@]}" down directus && "${DOCKER_COMPOSE_CMD[@]}" up -d directus); then
+        warn "Failed to restart Directus container automatically. You may need to restart it manually."
+    fi
+
+    success "Database restored from $backup_file"
+}
+
+# === Main Execution Logic ===
+check_dependencies
+
+CONFIG_FILE="${ALTO_CONFIG_FILE:-$DEFAULT_CONFIG_FILE}"
+if [[ "$CONFIG_FILE" != /* ]] && [[ -n "$CONFIG_FILE" ]]; then
+    CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE"
+fi
+
+load_configuration "$CONFIG_FILE"
+
+# Ensure required directories exist based on loaded config/defaults
+# BASE_DIR might be relative, ensure it's relative to SCRIPT_DIR if needed
+# Assuming BASE_DIR from .env should be relative to SCRIPT_DIR if not absolute
+if [[ "$BASE_DIR" != /* ]]; then
+    BASE_DIR="$SCRIPT_DIR/$BASE_DIR"
+fi
+ensure_directories "$BASE_DIR"
+
+declare -a passthrough_args=()
+command_to_run=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            if [[ -z "${2:-}" ]]; then
+                error "No configuration file specified after --config."
+            fi
+            local new_config_file="$2"
+            if [[ "$new_config_file" != /* ]]; then
+                new_config_file="$SCRIPT_DIR/$new_config_file"
+            fi
+            load_configuration "$new_config_file"
+            if [[ "$BASE_DIR" != /* ]]; then
+                BASE_DIR="$SCRIPT_DIR/$BASE_DIR"
+            fi
+            ensure_directories "$BASE_DIR"
+            shift 2
+            ;;
+        --help)
+            show_help
+            exit 0
+            ;;
+        *)
+            if [[ -z "$command_to_run" ]]; then
+                case "$1" in
+                    db-flush|db-dump|db-restore|psql|redis|d|directus|ds|directus-sync|init-directus-sync)
+                        command_to_run="$1"
+                        shift
+                        ;;
+                    *)
+                      passthrough_args+=("$1")
+                      shift
+                      ;;
+                esac
+            else
+                passthrough_args+=("$1")
+                shift
+            fi
+            ;;
+    esac
+done
+
+if [[ -n "$command_to_run" ]]; then
+    case "$command_to_run" in
+        db-flush)
+            run_db-flush "${passthrough_args[@]}"
+            ;;
+        db-dump)
+            run_db-dump "${passthrough_args[@]}"
+            ;;
+        db-restore)
+            run_db-restore "${passthrough_args[@]}"
+            ;;
+        psql)
+            run_psql "${passthrough_args[@]}"
+            ;;
+        redis)
+            run_redis "${passthrough_args[@]}"
+            ;;
+        d)
+            run_d "${passthrough_args[@]}"
+            ;;
+        directus)
+            run_directus "${passthrough_args[@]}"
+            ;;
+        ds)
+            run_ds "${passthrough_args[@]}"
+            ;;
+        directus-sync)
+            run_directus-sync "${passthrough_args[@]}"
+            ;;
+        init-directus-sync)
+            run_init-directus-sync "${passthrough_args[@]}"
+            ;;
+    esac
+    exit $?
+else
+    if [[ ${#passthrough_args[@]} -eq 0 ]]; then
+        show_help
+        exit 0
+    fi
+    "${DOCKER_COMPOSE_CMD[@]}" "${passthrough_args[@]}"
+    exit $?
+fi
