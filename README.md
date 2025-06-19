@@ -1,3 +1,5 @@
+![Directus Alto Framework Preview](docs/preview.jpeg)
+
 # Directus Alto Framework Template
 
 A comprehensive Directus CMS template designed to treat Directus not just as a content management system, but as a full-featured development framework. This template includes the powerful **Alto CLI** tool for streamlined development workflows, robust backup systems, and environment synchronization capabilities.
