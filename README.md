@@ -1,4 +1,4 @@
-![Directus Alto Framework Preview](docs/preview.jpeg)
+![Directus Alto Framework Preview](docs/preview.png)
 
 # Directus Alto Framework Template
 
