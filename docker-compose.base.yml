@@ -1,11 +1,22 @@
+version: "3.8"
 services:
   directus:
     build:
       context: .
       dockerfile: directus/Dockerfile
-    command: sh -c "node index.js >> /directus/logs/api.log 2>&1"
     restart: unless-stopped
     env_file: .env
+    environment:
+      PM2_LOG_ERROR_FILE: ${PM2_LOG_ERROR_FILE}
+      PM2_LOG_OUT_FILE: ${PM2_LOG_OUT_FILE}
+      PM2_LOGROTATE_ENABLE: ${PM2_LOGROTATE_ENABLE}
+      PM2_LOGROTATE_MAX_SIZE: ${PM2_LOGROTATE_MAX_SIZE}
+      PM2_LOGROTATE_RETAIN: ${PM2_LOGROTATE_RETAIN}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./directus/migrations:/directus/migrations
       - ./directus/data/uploads:/directus/uploads
@@ -29,6 +40,7 @@ services:
       - ./directus/data/database:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432" # SSH tunnel port forwarding for remote database access
+
 
   # cache:
   #   image: redis:6.2.10-alpine
