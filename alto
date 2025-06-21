@@ -134,6 +134,11 @@ show_help() {
     printf "  redis [redis_args...]    Access Redis CLI in the cache container\n"
     printf "                           Example: %s redis PING\n" "$(basename "$0")"
     printf "\n"
+    printf "  make extension           Create a new Directus extension interactively\n"
+    printf "                           Automatically places extension in ./directus/extensions/\n"
+    printf "                           and adds Docker volume mount\n"
+    printf "                           Example: %s make extension\n" "$(basename "$0")"
+    printf "\n"
     printf "  d [directus_args...]     Alias for 'directus' command\n"
     printf "  directus [directus_args...] Execute Directus CLI commands within the container\n"
     printf "                           Example: %s directus users create ...\n" "$(basename "$0")"
@@ -223,6 +228,207 @@ run_directus-sync() {
 
 run_ds() {
     run_directus-sync "$@"
+}
+
+add_volume_to_compose() {
+    local extension_name="$1"
+    local compose_file="$SCRIPT_DIR/docker-compose.base.yml"
+    local volume_line="      - ./directus/extensions/$extension_name:/directus/extensions/$extension_name"
+    
+    # Check if volume already exists
+    if grep -q "$volume_line" "$compose_file"; then
+        info "Volume mount already exists in docker-compose.base.yml"
+        return 0
+    fi
+    
+    # Find the volumes section in the directus service
+    local volumes_line_num
+    volumes_line_num=$(grep -n "^    volumes:" "$compose_file" | head -1 | cut -d: -f1)
+    
+    if [[ -n "$volumes_line_num" ]]; then
+        # Find the last volume mount line by looking for lines that start with "      -"
+        # We need to find the line number relative to the entire file
+        local last_volume_line_num=""
+        local line_num=$((volumes_line_num + 1))
+        
+        # Find the ports section to insert volume before it
+        local ports_line_num
+        ports_line_num=$(sed -n "${volumes_line_num},\$p" "$compose_file" | grep -n "^    ports:" | head -1 | cut -d: -f1)
+        
+        if [[ -n "$ports_line_num" ]]; then
+            # Calculate actual line number in file
+            local insert_line_num=$((volumes_line_num + ports_line_num - 1))
+            
+            # Cross-platform sed: handle macOS and Linux differences
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                sed -i '' "${insert_line_num}i\\
+$volume_line\\
+" "$compose_file"
+            else
+                sed -i "${insert_line_num}i\\$volume_line\\
+" "$compose_file"
+            fi
+            
+            success "Added volume mount to docker-compose.base.yml: $extension_name"
+        else
+            # Fallback: find the last volume mount line
+            local last_volume_line_num=""
+            local line_num=$((volumes_line_num + 1))
+            
+            # Read through the file starting after volumes: line
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
+                    # This is a volume mount line (starts with 6 spaces, then -, then space) and NOT a comment
+                    last_volume_line_num=$line_num
+                elif [[ "$line" =~ ^[[:space:]]{4}[a-zA-Z] ]]; then
+                    # This is the start of next section (4 spaces + letter, like "ports:")
+                    break
+                elif [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z] ]]; then
+                    # This is the start of next service (2 spaces + letter)
+                    break
+                fi
+                ((line_num++))
+            done < <(tail -n +$((volumes_line_num + 1)) "$compose_file")
+            
+            if [[ -n "$last_volume_line_num" ]]; then
+                # Insert after the last volume line
+                local insert_line_num=$((last_volume_line_num + 1))
+                
+                # Cross-platform sed: handle macOS and Linux differences
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "${insert_line_num}i\\
+$volume_line\\
+" "$compose_file"
+                else
+                    sed -i "${insert_line_num}i\\$volume_line\\
+" "$compose_file"
+                fi
+                
+                success "Added volume mount to docker-compose.base.yml: $extension_name"
+            else
+                # No volumes found, add right after volumes: line
+                local insert_line_num=$((volumes_line_num + 1))
+                
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "${insert_line_num}i\\
+$volume_line\\
+" "$compose_file"
+                else
+                    sed -i "${insert_line_num}i\\$volume_line\\
+" "$compose_file"
+                fi
+                
+                success "Added volume mount to docker-compose.base.yml: $extension_name"
+            fi
+        fi
+    else
+        warn "Could not find volumes section in docker-compose.base.yml. Please add volume mount manually:"
+        printf "      - ./directus/extensions/%s:/directus/extensions/%s\n" "$extension_name" "$extension_name"
+    fi
+}
+
+run_make() {
+    local subcommand="${1:-}"
+    
+    if [[ -z "$subcommand" ]]; then
+        error "Usage: $(basename "$0") make <subcommand>. Available subcommands: extension"
+    fi
+    
+    case "$subcommand" in
+        extension)
+            run_make_extension "${@:2}"
+            ;;
+        *)
+            error "Unknown make subcommand: $subcommand. Available subcommands: extension"
+            ;;
+    esac
+}
+
+run_make_extension() {
+    local extensions_dir="$SCRIPT_DIR/directus/extensions"
+    
+    # Ensure extensions directory exists
+    mkdir -p "$extensions_dir"
+    
+    info "Creating new Directus extension..."
+    
+    # Create extension in a temporary directory to avoid conflicts
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    local original_dir="$PWD"
+    cd "$temp_dir"
+    
+    # Record what's in temp_dir before running the command
+    local dirs_before
+    dirs_before=($(find "$temp_dir" -maxdepth 1 -type d ! -path "$temp_dir" 2>/dev/null || true))
+    
+    # Run create-directus-extension interactively (no output capture)
+    if ! bunx create-directus-extension@latest; then
+        cd "$original_dir"
+        rm -rf "$temp_dir"
+        error "Failed to create extension"
+    fi
+    
+    # Find what was created by comparing directories before and after
+    local dirs_after extension_path extension_name
+    dirs_after=($(find "$temp_dir" -maxdepth 1 -type d ! -path "$temp_dir" 2>/dev/null || true))
+    
+    # Find the new directory
+    for dir in "${dirs_after[@]}"; do
+        local found_in_before=false
+        for before_dir in "${dirs_before[@]}"; do
+            if [[ "$dir" == "$before_dir" ]]; then
+                found_in_before=true
+                break
+            fi
+        done
+        if [[ "$found_in_before" == false ]]; then
+            extension_path="$dir"
+            break
+        fi
+    done
+    
+    if [[ -z "$extension_path" ]] || [[ ! -d "$extension_path" ]]; then
+        cd "$original_dir"
+        rm -rf "$temp_dir"
+        error "Could not find created extension directory in $temp_dir"
+    fi
+    
+    extension_name=$(basename "$extension_path")
+    
+    # Move extension to the correct location
+    local target_path="$extensions_dir/$extension_name"
+    
+    if [[ -d "$target_path" ]]; then
+        warn "Extension directory already exists: $target_path"
+        printf "Overwrite existing extension? (y/N): " >&2
+        read -r confirm_overwrite
+        if ! [[ "$confirm_overwrite" =~ ^[Yy]$ ]]; then
+            info "Extension creation aborted."
+            cd "$original_dir"
+            rm -rf "$temp_dir"
+            return 0
+        fi
+        rm -rf "$target_path"
+    fi
+    
+    mv "$extension_path" "$target_path"
+    cd "$original_dir"
+    rm -rf "$temp_dir"
+    
+    success "Extension created: $target_path"
+    
+    # Add volume mount to docker-compose.base.yml
+    add_volume_to_compose "$extension_name"
+    
+    # Show next steps
+    info "Next steps:"
+    printf "  1. cd directus/extensions/%s\n" "$extension_name"
+    printf "  2. npm install\n"
+    printf "  3. npm run dev\n"
+    printf "  4. ./alto restart directus  # to load the extension\n"
+    printf "\n"
+    printf "Extension will be automatically reloaded when you make changes (if CHOKIDAR_USEPOLLING=true is set).\n"
 }
 
 run_psql() {
@@ -369,9 +575,9 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            if [[ -z "$command_to_run" ]]; then
+                            if [[ -z "$command_to_run" ]]; then
                 case "$1" in
-                    db-flush|db-dump|db-restore|psql|redis|d|directus|ds|directus-sync|init-directus-sync)
+                    db-flush|db-dump|db-restore|psql|redis|make|d|directus|ds|directus-sync|init-directus-sync)
                         command_to_run="$1"
                         shift
                         ;;
@@ -404,6 +610,9 @@ if [[ -n "$command_to_run" ]]; then
             ;;
         redis)
             run_redis "${passthrough_args[@]}"
+            ;;
+        make)
+            run_make "${passthrough_args[@]}"
             ;;
         d)
             run_d "${passthrough_args[@]}"

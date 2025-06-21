@@ -265,6 +265,10 @@ REMOTE_PROJECT_PATH=/srv/backend-directus
 
 # Alto CLI Configuration
 ALTO_BASE_DIR=./directus/data/.alto
+
+# Extensions Development (Development Only)
+# Enable polling-based file watching for extension hot-reloading on macOS/Windows + Docker
+# CHOKIDAR_USEPOLLING=true
 ```
 
 ⚠️ **Security Warning**: The default values above are for development only. **Always change SECRET, passwords, and tokens before deploying to production!**
@@ -296,14 +300,81 @@ ALTO_BASE_DIR=./directus/data/.alto
 ```
 
 ### 2. Extension Development
+
+#### Creating Extensions
 ```bash
-# Mount your extensions in docker-compose.yml
+# Create a new extension interactively
+./alto make extension
+
+# Follow the prompts to choose:
+# - Extension type (endpoint, hook, interface, display, etc.)
+# - Extension name
+# - Language (JavaScript/TypeScript)
+# - Auto install dependencies
+
+# Alto will automatically:
+# - Place the extension in ./directus/extensions/
+# - Add Docker volume mount to docker-compose.base.yml
+# - Show next steps
+```
+
+#### Manual Extension Setup
+```bash
+# If you need to manually mount extensions in docker-compose.yml
 # volumes:
 #   - ./directus/extensions/my-extension:/directus/extensions/my-extension
 
 # Restart to load extensions
 ./alto restart directus
 ```
+
+#### Extension Hot-Reloading Issues (macOS/Windows + Docker)
+
+If your extensions are not auto-reloading when files change in Docker on macOS or Windows, you may need to enable polling-based file watching:
+
+1. **Enable in your `.env` file:**
+```bash
+# Uncomment this line in your .env file
+CHOKIDAR_USEPOLLING=true
+```
+
+2. **Restart your containers:**
+```bash
+./alto restart directus
+```
+
+**Why this happens:** Docker containers use their own filesystem, and filesystem events from the host OS (macOS/Windows) may not propagate correctly to the container. This is a common issue documented in [Directus Issue #18721](https://github.com/directus/directus/issues/18721).
+
+**How polling works:** Instead of waiting for filesystem events, polling periodically checks for file changes. This is more CPU-intensive but works reliably across different OS/Docker combinations.
+
+**Performance note:** Only enable `CHOKIDAR_USEPOLLING` for development environments. Disable it in production to save CPU resources.
+
+#### Extension Development Workflow
+
+**Complete workflow with Alto CLI:**
+
+```bash
+# 1. Create extension
+./alto make extension
+# Choose: endpoint, my-api, TypeScript, Yes (install deps)
+
+# 2. Extension is automatically placed and mounted
+# 3. Develop your extension
+cd directus/extensions/my-api
+npm run dev  # Watch mode for auto-compilation
+
+# 4. Extension auto-reloads in Directus (with CHOKIDAR_USEPOLLING=true)
+# 5. Test your changes at http://localhost:8055/my-api
+
+# 6. Build for production
+npm run build
+```
+
+**Benefits of Alto's extension workflow:**
+- ✅ **Zero Configuration**: Automatic placement and Docker mounting
+- ✅ **Hot Reloading**: Instant feedback during development
+- ✅ **Cross-Platform**: Works on macOS, Windows, and Linux
+- ✅ **Production Ready**: Built extensions work immediately
 
 ### 3. Database Snapshots
 ```bash

@@ -22,6 +22,7 @@ services:
       - ./directus/data/uploads:/directus/uploads
       - ./directus/data/logs:/directus/logs
       # Mount your extensions here as separate volumes to prevent overwriting the base extensions in the base image
+      # Use: ./alto make extension - to create and automatically mount new extensions
       # - ./directus/extensions/your-extension:/directus/extensions/your-extension
     ports:
       - "127.0.0.1:8055:8055"
