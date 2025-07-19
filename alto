@@ -575,7 +575,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-                            if [[ -z "$command_to_run" ]]; then
+            if [[ -z "$command_to_run" ]]; then
                 case "$1" in
                     db-flush|db-dump|db-restore|psql|redis|make|d|directus|ds|directus-sync|init-directus-sync)
                         command_to_run="$1"
